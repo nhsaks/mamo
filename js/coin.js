@@ -4,9 +4,31 @@ import { refreshAccountBalance, syncAccountUI } from './player.js';
 
 let txCooldownUntil = 0;
 let txCooldownTimer = null;
+let hasPendingDWRequest = false;
 
 export function isTxLocked() {
   return Date.now() < txCooldownUntil;
+}
+
+export async function refreshPendingDWStatus() {
+  if (!state.account.mobile) {
+    hasPendingDWRequest = false;
+    return false;
+  }
+  try {
+    const { data, error } = await supabase
+      .from('mobile_coin_tx')
+      .select('id')
+      .eq('sender_mobile', state.account.mobile)
+      .eq('status', 'pending')
+      .in('tx_type', ['deposit_req', 'withdraw_req'])
+      .limit(1);
+
+    if (!error) {
+      hasPendingDWRequest = Array.isArray(data) && data.length > 0;
+    }
+  } catch (e) {}
+  return hasPendingDWRequest;
 }
 
 export function showWalletPopup(message, isSuccess = true) {
@@ -63,6 +85,10 @@ export function validateWalletActionButtons() {
   }
 
   const reqBtn = document.getElementById('btnSubmitBrokerReq');
+  const pendingNotice = document.getElementById('pendingRequestNotice');
+  if (pendingNotice) {
+    pendingNotice.classList.toggle('hidden', !hasPendingDWRequest);
+  }
   if (reqBtn) {
     const brokerMobile = document.getElementById('brokerMobileInput').value.trim();
     const actionType = document.getElementById('reqActionType').value;
@@ -73,9 +99,11 @@ export function validateWalletActionButtons() {
       ? true
       : (bal >= minLimit && bal >= amt);
 
-    reqBtn.disabled = locked || !validMobile || !validAmt || !balanceSufficient;
+    reqBtn.disabled = locked || hasPendingDWRequest || !validMobile || !validAmt || !balanceSufficient;
     if (locked) {
       reqBtn.textContent = `Locked (${secsLeft}s)...`;
+    } else if (hasPendingDWRequest) {
+      reqBtn.textContent = 'Pending Request Exists';
     } else if (actionType === 'withdraw_req' && bal < minLimit) {
       reqBtn.textContent = `Balance Below Limit (${bal} < ${minLimit})`;
     } else if (amt > 0 && amt < minLimit) {
@@ -125,7 +153,7 @@ export async function runMatchCoinRpc(action, amount, note, targetMobile = null)
   return Number(newBal);
 }
 
-export async function creditWalletCoinsReliable(targetMobile, amount, txType, note) {
+export async function creditWalletCoinsReliable(targetMobile, amount, txType, note, senderMobile = 'SYSTEM') {
   if (!targetMobile || amount <= 0) return;
 
   const { error: rpcErr } = await supabase.rpc('credit_account_coins', {
@@ -152,7 +180,7 @@ export async function creditWalletCoinsReliable(targetMobile, amount, txType, no
     await supabase
       .from('mobile_coin_tx')
       .insert({
-        sender_mobile: 'SYSTEM',
+        sender_mobile: senderMobile,
         receiver_mobile: targetMobile,
         amount,
         tx_type: txType,
@@ -160,6 +188,21 @@ export async function creditWalletCoinsReliable(targetMobile, amount, txType, no
         note
       });
   }
+}
+
+export async function creditBrokerDepositWithdrawFee(brokerMobile, baseAmount, kindLabel, userMobile) {
+  const feePct = Number(state.platformConfig.brokerTxFeePct ?? 5);
+  const feeCoins = Math.floor((Number(baseAmount || 0) * feePct) / 100);
+  if (!brokerMobile || feeCoins <= 0) return 0;
+
+  await creditWalletCoinsReliable(
+    brokerMobile,
+    feeCoins,
+    'broker_fee',
+    `Broker ${kindLabel} fee (${feePct}% of ${baseAmount}) from ${userMobile}`,
+    userMobile || 'SYSTEM'
+  );
+  return feeCoins;
 }
 
 let stakeDeductionPromise = null;
@@ -177,7 +220,6 @@ export async function deductPlayerWalletStakeOnce(targetMobile, stakeAmount, roo
 
   const note = `Match Start Stake (${roomCode || 'ONLINE'}${matchSessionId ? ` #${matchSessionId}` : ''})`;
 
-  // 1. Check if this exact matchSessionId was already deducted in mobile_coin_tx (prevents double-cut on retry)
   if (matchSessionId) {
     const { data: existingTx } = await supabase
       .from('mobile_coin_tx')
@@ -197,7 +239,6 @@ export async function deductPlayerWalletStakeOnce(targetMobile, stakeAmount, roo
     }
   }
 
-  // 2. Fetch fresh wallet balance & device hash from DB
   const { data: beforeRow, error: fetchErr } = await supabase
     .from('mobile_accounts')
     .select('coins, device_hash')
@@ -213,7 +254,6 @@ export async function deductPlayerWalletStakeOnce(targetMobile, stakeAmount, roo
     return { ok: false, error: `Insufficient coins (${startCoins} < ${stake}) for ${targetMobile}.` };
   }
 
-  // 3. Try RPC first (using target's own device_hash if called by self, or beforeRow.device_hash)
   const devHash = targetMobile === state.account.mobile ? state.deviceHash : (beforeRow.device_hash || state.deviceHash);
   const { data: rpcBal, error: rpcErr } = await supabase.rpc('mobile_match_coins', {
     p_mobile: targetMobile,
@@ -227,7 +267,6 @@ export async function deductPlayerWalletStakeOnce(targetMobile, stakeAmount, roo
   if (!rpcErr && rpcBal !== null && rpcBal !== undefined) {
     finalCoins = Number(rpcBal);
   } else {
-    // 4. Direct optimistic-locked DB update fallback (guarantees deduction even if RPC fails)
     const expectedAfter = startCoins - stake;
     const { data: updRow, error: updErr } = await supabase
       .from('mobile_accounts')
@@ -252,7 +291,6 @@ export async function deductPlayerWalletStakeOnce(targetMobile, stakeAmount, roo
     });
   }
 
-  // 5. Post-check DB balance to guarantee exact deduction occurred
   const { data: afterRow } = await supabase
     .from('mobile_accounts')
     .select('coins')
@@ -308,6 +346,9 @@ export async function deductStakeOnMatchStart(stakeAmount, roomCode, matchSessio
 }
 
 export async function loadWalletTransactions() {
+  await refreshPendingDWStatus();
+  validateWalletActionButtons();
+
   const { data } = await supabase
     .from('mobile_coin_tx')
     .select('*')

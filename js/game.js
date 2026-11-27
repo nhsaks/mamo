@@ -6,7 +6,7 @@ import {
 } from './supabase.js';
 import { sfx } from './sound.js';
 import { refreshAccountBalance } from './player.js';
-import { fetchRemotePlatformConfig } from './admin.js';
+import { fetchRemotePlatformConfig, parsePotStakesInput } from './admin.js';
 import {
   runMatchCoinRpc,
   creditWalletCoinsReliable,
@@ -32,11 +32,41 @@ const MATCHMAKING_TIMEOUT_SECONDS = 30;
 let turnTimerInterval = null;
 let turnSecondsLeft = 30;
 const TURN_DURATION_SECONDS = 30;
-const MAX_MISSED_TURNS = 5;
+
+let homeRefreshCooldownUntil = 0;
+let homeRefreshTimer = null;
+
 let awaitingRejoinSync = false;
 let rejoinSyncTimeout = null;
 let rejoinSyncRetryInterval = null;
 let handledTimeoutKey = null;
+
+function getMaxMissedTurns() {
+  const n = Number(state.platformConfig.maxMissedTurns ?? 5);
+  return Number.isFinite(n) && n >= 1 ? n : 5;
+}
+
+export function getMasterClientMobile(game = state.game) {
+  if (!game || game.mode !== 'online' || !Array.isArray(game.activeSeats)) return null;
+  const aliveMobiles = game.activeSeats
+    .map(idx => game.seats[idx])
+    .filter(s => s && !s.eliminated && s.mobile && s.mobile !== 'LOCAL')
+    .map(s => s.mobile)
+    .sort();
+  return aliveMobiles[0] || game.hostMobile || null;
+}
+
+export function isCurrentUserMasterClient(game = state.game) {
+  if (!game || game.mode !== 'online') return true;
+  const masterMobile = getMasterClientMobile(game);
+  return Boolean(masterMobile && masterMobile === state.account.mobile);
+}
+
+export function isUserCurrentlyInMatchOrMatchmaking() {
+  const activeGame = Boolean(state.game && state.game.phase !== 'GAMEOVER');
+  const activeWaiting = Boolean(state.waitingRoomState && state.waitingRoomState.status === 'WAITING');
+  return activeGame || activeWaiting || Boolean(state.autoMatchLocked);
+}
 
 function requestRejoinSyncState() {
   if (!awaitingRejoinSync || !state.game) return;
@@ -76,7 +106,10 @@ function finishRejoinSyncWait() {
 }
 
 function promoteHostAfterElimination(game, eliminatedSeatIdx) {
-  if (game.mode !== 'online' || game.hostMobile !== game.seats[eliminatedSeatIdx]?.mobile) return;
+  if (game.mode !== 'online') return;
+  const nextMaster = getMasterClientMobile(game);
+  if (nextMaster) game.hostMobile = nextMaster;
+  if (game.hostMobile !== game.seats[eliminatedSeatIdx]?.mobile) return;
   const nextHostIdx = game.activeSeats.find(seatIdx =>
     seatIdx !== eliminatedSeatIdx &&
     game.seats[seatIdx] &&
@@ -89,7 +122,6 @@ function promoteHostAfterElimination(game, eliminatedSeatIdx) {
 
 function sendRoomBroadcast(event, payload) {
   if (!state.realtimeChannel) {
-    console.error(`Cannot send ${event}: no match realtime channel is connected.`);
     return;
   }
   state.realtimeChannel.send({ type: 'broadcast', event, payload }).then(status => {
@@ -111,11 +143,12 @@ let signalingUnsubscribeTimer = null;
 export function updateAutoMatchButtonState() {
   const btn = document.getElementById('startAutoMatchBtn');
   if (!btn) return;
-  const isWaiting = Boolean(state.waitingRoomState && state.waitingRoomState.status === 'WAITING');
-  const locked = state.autoMatchLocked || isWaiting;
-  btn.disabled = locked;
-  if (isWaiting) {
+  const busy = isUserCurrentlyInMatchOrMatchmaking();
+  btn.disabled = busy;
+  if (state.waitingRoomState && state.waitingRoomState.status === 'WAITING') {
     btn.innerHTML = `⏳ Auto-Matching (${matchmakingSecondsLeft}s)...`;
+  } else if (state.game && state.game.phase !== 'GAMEOVER') {
+    btn.innerHTML = `🎲 In Match`;
   } else if (state.autoMatchLocked) {
     btn.innerHTML = `⏳ Matching Locked...`;
   } else {
@@ -123,7 +156,43 @@ export function updateAutoMatchButtonState() {
   }
 }
 
+export function renderStakeButtons() {
+  const grid = document.getElementById('stakeGrid');
+  if (!grid) return;
+  const stakes = parsePotStakesInput(state.platformConfig.potStakes);
+  state.platformConfig.potStakes = stakes;
+  if (!stakes.includes(Number(state.selectedStake))) {
+    state.selectedStake = stakes[0];
+  }
+
+  const tiers = ['Bronze', 'Silver', 'Gold', 'Platinum', 'Diamond', 'VIP Royale'];
+  const colors = ['text-amber-300', 'text-sky-300', 'text-purple-300', 'text-emerald-300', 'text-cyan-300', 'text-rose-300'];
+
+  grid.innerHTML = '';
+  stakes.forEach((amt, idx) => {
+    const selected = Number(state.selectedStake) === Number(amt);
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.dataset.stake = String(amt);
+    btn.className = selected
+      ? 'stake-btn rounded-xl p-2.5 border-2 border-amber-400 bg-amber-500/15 flex flex-col items-center cursor-pointer'
+      : 'stake-btn rounded-xl p-2.5 border border-white/10 bg-slate-900/70 flex flex-col items-center cursor-pointer';
+    btn.innerHTML = `
+      <span class="text-[10px] font-bold uppercase ${colors[idx % colors.length]}">${tiers[idx % tiers.length]}</span>
+      <span class="text-sm sm:text-base font-black text-white mt-0.5">${Number(amt).toLocaleString()}</span>
+      <span class="text-[10px] text-slate-400">Coins</span>
+    `;
+    btn.addEventListener('click', () => {
+      state.selectedStake = Number(amt);
+      renderStakeButtons();
+      refreshPotPreview();
+    });
+    grid.appendChild(btn);
+  });
+}
+
 export function refreshPotPreview() {
+  renderStakeButtons();
   const feePct = Number(state.platformConfig.gameFeePct ?? 20);
   document.getElementById('previewPotText').textContent = (state.selectedStake * state.selectedPlayerCount).toLocaleString();
   document.getElementById('feeSummaryText').textContent = `${feePct}% Fee`;
@@ -146,7 +215,7 @@ export async function switchView(viewName) {
 }
 
 // ---------------------------------------------------------
-// WEBRTC P2P MESH (OFFLOADS GAME MESSAGES FROM SUPABASE)
+// WEBRTC P2P MESH + MASTER CLIENT SYNC
 // ---------------------------------------------------------
 function updateP2PStatusBadge() {
   const badge = document.getElementById('p2pStatusBadge');
@@ -160,11 +229,12 @@ function updateP2PStatusBadge() {
   rtcPeers.forEach(entry => {
     if (entry.dc && entry.dc.readyState === 'open') openCount++;
   });
+  const masterTag = isCurrentUserMasterClient(state.game) ? ' • MASTER' : '';
   if (openCount > 0) {
-    badge.textContent = `P2P (${openCount})`;
+    badge.textContent = `P2P (${openCount})${masterTag}`;
     badge.className = 'text-[10px] font-bold px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-400/40';
   } else {
-    badge.textContent = 'RELAY';
+    badge.textContent = `RELAY${masterTag}`;
     badge.className = 'text-[10px] font-bold px-2 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-400/30';
   }
 }
@@ -201,7 +271,7 @@ function bindDataChannelHandlers(peerMobile, dc) {
     if (entry) entry.connected = true;
     updateP2PStatusBadge();
 
-    if (state.game && state.game.mode === 'online' && !awaitingRejoinSync) {
+    if (state.game && state.game.mode === 'online' && !awaitingRejoinSync && isCurrentUserMasterClient(state.game)) {
       sendMatchEvent('rejoin_sync_state', {
         targetMobile: peerMobile,
         gameState: createRecoverableGameState(state.game)
@@ -517,6 +587,9 @@ function renderHomeQueueBoards() {
           switchView('waiting');
           return;
         }
+        if (isUserCurrentlyInMatchOrMatchmaking()) {
+          return showToast('Finish or leave your current match/matchmaking first.', 'danger');
+        }
         if (Number(state.account.coins) < Number(r.stake)) {
           return showToast(`Need at least ${r.stake} coins to join this match.`, 'danger');
         }
@@ -541,6 +614,9 @@ function generateRoomCode() {
 }
 
 async function hostOnlineTable(isPublicAutoMatch) {
+  if (isUserCurrentlyInMatchOrMatchmaking() && !state.autoMatchLocked) {
+    return showToast('Already in a match or matchmaking.', 'danger');
+  }
   if (Number(state.account.coins) < Number(state.selectedStake)) {
     state.autoMatchLocked = false;
     updateAutoMatchButtonState();
@@ -614,12 +690,17 @@ function createInitialGameState({ mode, playerCount, stake, seats }) {
       seats[idx].lastDiceRoll = seats[idx].lastDiceRoll ?? null;
     }
   });
+  const aliveMobiles = activeSeatIndices
+    .map(i => seats[i]?.mobile)
+    .filter(m => m && m !== 'LOCAL')
+    .sort();
   return {
     mode,
     playerCount,
     stake,
     pot: mode === 'local' ? 0 : stake * playerCount,
     activeSeats: activeSeatIndices,
+    masterMobile: aliveMobiles[0] || null,
     turnSeat: activeSeatIndices[0],
     turnSeq: 1,
     turnStartedAt: Date.now(),
@@ -687,10 +768,11 @@ export function checkSavedMatchForRejoin() {
   try {
     const snapshot = JSON.parse(raw);
     const mySeat = snapshot.game?.seats?.[snapshot.mySeatIndex];
+    const maxMiss = getMaxMissedTurns();
     if (snapshot.game && snapshot.game.phase !== 'GAMEOVER' && mySeat && !mySeat.eliminated) {
       document.getElementById('rejoinMatchInfoText').textContent =
         snapshot.game.mode === 'online'
-          ? `You are active in Online Room ${snapshot.roomCode} (${mySeat.missedTurns || 0}/${MAX_MISSED_TURNS} misses). Tap to resume!`
+          ? `You are active in Online Room ${snapshot.roomCode} (${mySeat.missedTurns || 0}/${maxMiss} misses). Tap to resume!`
           : `You have an active Local Pass & Play match in progress. Tap to resume!`;
       banner.classList.remove('hidden');
     } else {
@@ -706,6 +788,7 @@ export function checkSavedMatchForRejoin() {
 function pushOnlineState(reliable = false) {
   persistActiveMatchSnapshot();
   if (state.game && state.game.mode === 'online') {
+    state.game.masterMobile = getMasterClientMobile(state.game);
     const publicState = {
       ...state.game,
       validTokens: []
@@ -732,6 +815,7 @@ export async function forfeitCurrentPlayer() {
   forfeitingSeat.eliminated = true;
   forfeitingSeat.forfeited = true;
   promoteHostAfterElimination(game, forfeitingSeatIdx);
+  game.masterMobile = getMasterClientMobile(game);
   delete game.movingTokenIdx;
   delete game.moveStartProg;
   state.isAnimatingMove = false;
@@ -739,22 +823,27 @@ export async function forfeitCurrentPlayer() {
   const survivingSeats = game.activeSeats.filter(seatIdx =>
     game.seats[seatIdx] && !game.seats[seatIdx].eliminated
   );
+
   if (survivingSeats.length <= 1) {
     game.turnSeq = (game.turnSeq || 0) + 1;
     game.phase = 'GAMEOVER';
     game.winnerSeat = survivingSeats[0] ?? game.turnSeat;
     game.validTokens = [];
-  } else if (game.turnSeat === forfeitingSeatIdx) {
-    const currentIndex = game.activeSeats.indexOf(game.turnSeat);
-    for (let offset = 1; offset <= game.activeSeats.length; offset++) {
-      const candidate = game.activeSeats[(currentIndex + offset) % game.activeSeats.length];
-      if (game.seats[candidate] && !game.seats[candidate].eliminated) {
-        game.turnSeat = candidate;
-        break;
+  } else {
+    // Players are NOT alone: keep match alive and shift turn on time-based clock
+    if (game.turnSeat === forfeitingSeatIdx) {
+      const currentIndex = game.activeSeats.indexOf(game.turnSeat);
+      for (let offset = 1; offset <= game.activeSeats.length; offset++) {
+        const candidate = game.activeSeats[(currentIndex + offset) % game.activeSeats.length];
+        if (game.seats[candidate] && !game.seats[candidate].eliminated) {
+          game.turnSeat = candidate;
+          break;
+        }
       }
     }
     game.turnSeq = (game.turnSeq || 0) + 1;
     game.phase = 'ROLL';
+    game.diceValue = null;
     game.consecutiveSixes = 0;
     game.validTokens = [];
     game.turnStartedAt = Date.now();
@@ -790,11 +879,10 @@ function handleIncomingMatchEvent(event, payload, isRejoinSync = false) {
 
   if (event === 'rejoin_sync_req') {
     if (state.game && payload.mobile && payload.mobile !== state.account.mobile) {
-      const isHost = state.account.mobile === state.game.hostMobile;
-      const requesterIsHost = payload.mobile === state.game.hostMobile;
+      const isMaster = isCurrentUserMasterClient(state.game);
       const requesterTurnSeq = Number(payload.turnSeq || 0);
       const localTurnSeq = Number(state.game.turnSeq || 0);
-      if (localTurnSeq < requesterTurnSeq || (!isHost && localTurnSeq === requesterTurnSeq && !requesterIsHost)) return;
+      if (!isMaster && localTurnSeq < requesterTurnSeq) return;
       const syncPayload = {
         targetMobile: payload.mobile,
         gameState: createRecoverableGameState(state.game)
@@ -906,6 +994,7 @@ function handleIncomingMatchEvent(event, payload, isRejoinSync = false) {
       }
     }
 
+    state.game.masterMobile = getMasterClientMobile(state.game);
     finishRejoinSyncWait();
     state.isAnimatingMove = false;
     if (
@@ -982,7 +1071,6 @@ function joinRealtimeRoom(code, isHost, isRejoining = false, onConnected = null)
         updateAutoMatchButtonState();
         await updateLobbyPresenceRoom(null);
 
-        // Deduct stake for EVERY seated player idempotently via matchSessionId so neither wallet can be skipped
         const stake = Number(state.waitingRoomState.stake || 0);
         const sessionId = state.waitingRoomState.matchSessionId;
         const seatedPlayers = state.waitingRoomState.activeSeats
@@ -1014,10 +1102,10 @@ function joinRealtimeRoom(code, isHost, isRejoining = false, onConnected = null)
         state.game = createInitialGameState(state.waitingRoomState);
         state.game.mode = 'online';
         state.game.hostMobile = state.account.mobile;
+        state.game.masterMobile = getMasterClientMobile(state.game);
         state.game.matchSessionId = state.waitingRoomState.matchSessionId;
         await initiateMeshConnectionsForMatch(state.game.seats);
         await enterGameView();
-        // Send initial game_state twice (immediate + 600ms) so joiner never misses match start
         pushOnlineState(true);
         setTimeout(() => {
           if (state.game && state.game.mode === 'online' && state.game.turnSeq === 1) {
@@ -1052,6 +1140,7 @@ function joinRealtimeRoom(code, isHost, isRejoining = false, onConnected = null)
         state.game = createInitialGameState(payload);
         state.game.mode = 'online';
         state.game.hostMobile = payload.hostMobile;
+        state.game.masterMobile = getMasterClientMobile(state.game);
         state.game.matchSessionId = payload.matchSessionId || '';
         await initiateMeshConnectionsForMatch(state.game.seats);
         await enterGameView();
@@ -1157,11 +1246,12 @@ function restartTurnTimer() {
 async function handleTurnTimeoutAutoShift() {
   const game = state.game;
   if (!game || game.phase === 'GAMEOVER') return;
-  // Every peer handles the same timed-out turn so a disconnected host cannot stall the match.
+
   const timeoutKey = `${state.onlineRoomCode || game.mode}:${game.turnSeq || 1}:${game.turnSeat}`;
   if (handledTimeoutKey === timeoutKey) return;
   handledTimeoutKey = timeoutKey;
 
+  const maxMiss = getMaxMissedTurns();
   const timedOutSeatIdx = game.turnSeat;
   const seat = game.seats[timedOutSeatIdx];
   if (!seat || seat.eliminated) {
@@ -1177,13 +1267,14 @@ async function handleTurnTimeoutAutoShift() {
   }
   state.isAnimatingMove = false;
   seat.missedTurns = (seat.missedTurns || 0) + 1;
-  showToast(`⏰ ${seat.name} missed turn (${seat.missedTurns}/${MAX_MISSED_TURNS})`, 'danger');
+  showToast(`⏰ ${seat.name} missed turn (${seat.missedTurns}/${maxMiss})`, 'danger');
 
-  if (seat.missedTurns >= MAX_MISSED_TURNS) {
+  if (seat.missedTurns >= maxMiss) {
     seat.eliminated = true;
     promoteHostAfterElimination(game, timedOutSeatIdx);
+    game.masterMobile = getMasterClientMobile(game);
     sfx.eliminate();
-    showToast(`🚫 ${seat.name} missed 5 turns and is OUT!`, 'danger');
+    showToast(`🚫 ${seat.name} missed ${maxMiss} turns and is OUT!`, 'danger');
 
     const survivingSeats = game.activeSeats.filter(sIdx => game.seats[sIdx] && !game.seats[sIdx].eliminated);
     if (survivingSeats.length <= 1) {
@@ -1193,7 +1284,7 @@ async function handleTurnTimeoutAutoShift() {
       game.winnerSeat = winnerSeatIdx;
       game.validTokens = [];
       syncGameUI();
-      pushOnlineState();
+      pushOnlineState(true);
       handleVictoryTrigger(winnerSeatIdx);
       return;
     }
@@ -1247,7 +1338,7 @@ export async function executeTokenMove(tokenIdx) {
         game.winnerSeat = seatIdx;
         state.isAnimatingMove = false;
         syncGameUI();
-        pushOnlineState();
+        pushOnlineState(true);
         handleVictoryTrigger(seatIdx);
         return;
       }
@@ -1301,7 +1392,7 @@ export function advanceTurn(bonusRoll) {
     game.phase = 'GAMEOVER';
     game.winnerSeat = winnerSeatIdx;
     syncGameUI();
-    pushOnlineState();
+    pushOnlineState(true);
     handleVictoryTrigger(winnerSeatIdx);
     return;
   }
@@ -1320,13 +1411,15 @@ export function advanceTurn(bonusRoll) {
     game.consecutiveSixes = 0;
   }
 
+  game.masterMobile = getMasterClientMobile(game);
   game.turnSeq = (game.turnSeq || 0) + 1;
   game.phase = 'ROLL';
+  game.diceValue = null;
   game.validTokens = [];
   game.turnStartedAt = Date.now();
   restartTurnTimer();
   syncGameUI();
-  pushOnlineState();
+  pushOnlineState(true);
 }
 
 async function handleVictoryTrigger(winnerSeatIdx) {
@@ -1454,6 +1547,7 @@ async function enterGameView() {
 export function syncGameUI() {
   const game = state.game;
   if (!game) return;
+  const maxMiss = getMaxMissedTurns();
   updateP2PStatusBadge();
   document.getElementById('activePotDisplay').textContent = game.mode === 'local' ? 'FREE' : game.pot.toLocaleString();
   const roomBadge = document.getElementById('roomBadgeInGame');
@@ -1508,8 +1602,8 @@ export function syncGameUI() {
     const lastRollText = seat.lastDiceRoll ? `🎲 ${seat.lastDiceRoll}` : '🎲 -';
     const misses = seat.missedTurns || 0;
     const statusLabel = seat.eliminated
-      ? `<span class="text-[10px] font-black text-rose-400">${seat.forfeited ? 'FORFEIT' : 'OUT (5/5)'}</span>`
-      : `<span class="text-[10px] font-bold ${misses >= 3 ? 'text-rose-400' : 'text-slate-400'}">Miss: ${misses}/${MAX_MISSED_TURNS}</span>`;
+      ? `<span class="text-[10px] font-black text-rose-400">${seat.forfeited ? 'FORFEIT' : `OUT (${maxMiss}/${maxMiss})`}</span>`
+      : `<span class="text-[10px] font-bold ${misses >= Math.max(1, maxMiss - 1) ? 'text-rose-400' : 'text-slate-400'}">Miss: ${misses}/${maxMiss}</span>`;
 
     card.innerHTML = `
       <div class="flex items-center justify-between gap-1.5">
@@ -1574,18 +1668,41 @@ async function applyForfeitAndLeave() {
   }
 }
 
+function updateHomeRefreshButtonUI() {
+  const btn = document.getElementById('homeRefreshBtn');
+  if (!btn) return;
+  const now = Date.now();
+  if (now < homeRefreshCooldownUntil) {
+    const secs = Math.ceil((homeRefreshCooldownUntil - now) / 1000);
+    btn.disabled = true;
+    btn.textContent = `↻ ${secs}s`;
+  } else {
+    btn.disabled = false;
+    btn.textContent = '↻ Refresh';
+  }
+}
+
 export function initGameBindings() {
-  document.querySelectorAll('.stake-btn').forEach(btn => {
-    btn.addEventListener('click', () => {
-      state.selectedStake = parseInt(btn.dataset.stake, 10);
-      document.querySelectorAll('.stake-btn').forEach(b => {
-        b.classList.remove('border-2', 'border-amber-400', 'bg-amber-500/15');
-        b.classList.add('border', 'border-white/10', 'bg-slate-900/70');
-      });
-      btn.classList.remove('border', 'border-white/10', 'bg-slate-900/70');
-      btn.classList.add('border-2', 'border-amber-400', 'bg-amber-500/15');
-      refreshPotPreview();
-    });
+  renderStakeButtons();
+
+  document.getElementById('homeRefreshBtn').addEventListener('click', async () => {
+    if (Date.now() < homeRefreshCooldownUntil) return;
+    homeRefreshCooldownUntil = Date.now() + 5000;
+    updateHomeRefreshButtonUI();
+    if (homeRefreshTimer) clearInterval(homeRefreshTimer);
+    homeRefreshTimer = setInterval(() => {
+      updateHomeRefreshButtonUI();
+      if (Date.now() >= homeRefreshCooldownUntil) {
+        clearInterval(homeRefreshTimer);
+        homeRefreshTimer = null;
+      }
+    }, 200);
+
+    await refreshAccountBalance(validateWalletActionButtons);
+    await fetchRemotePlatformConfig(refreshPotPreview);
+    checkSavedMatchForRejoin();
+    renderHomeQueueBoards();
+    showToast('Home refreshed (5s lock active)', 'success');
   });
 
   document.querySelectorAll('.pcount-btn').forEach(btn => {
@@ -1608,7 +1725,9 @@ export function initGameBindings() {
   });
 
   document.getElementById('startAutoMatchBtn').addEventListener('click', async () => {
-    if (state.autoMatchLocked || (state.waitingRoomState && state.waitingRoomState.status === 'WAITING')) return;
+    if (isUserCurrentlyInMatchOrMatchmaking()) {
+      return showToast('Cannot start matchmaking while in a game or already matching.', 'danger');
+    }
     if (Number(state.account.coins) < Number(state.selectedStake)) {
       return showToast(`Insufficient balance (${state.account.coins}) for ${state.selectedStake} coin stake.`, 'danger');
     }
@@ -1634,7 +1753,9 @@ export function initGameBindings() {
 
   document.getElementById('createOnlineRoomBtn').addEventListener('click', async (e) => {
     const btn = e.currentTarget;
-    if (btn.disabled || state.autoMatchLocked) return;
+    if (btn.disabled || isUserCurrentlyInMatchOrMatchmaking()) {
+      return showToast('Finish or leave your active match/matchmaking first.', 'danger');
+    }
     if (Number(state.account.coins) < Number(state.selectedStake)) {
       return showToast(`Insufficient balance (${state.account.coins}) for ${state.selectedStake} coin stake.`, 'danger');
     }
@@ -1650,7 +1771,9 @@ export function initGameBindings() {
 
   document.getElementById('joinOnlineRoomBtn').addEventListener('click', async (e) => {
     const btn = e.currentTarget;
-    if (btn.disabled || state.autoMatchLocked) return;
+    if (btn.disabled || isUserCurrentlyInMatchOrMatchmaking()) {
+      return showToast('Finish or leave your active match/matchmaking first.', 'danger');
+    }
     const code = document.getElementById('joinRoomCodeInput').value.trim().toUpperCase();
     if (code.length < 4) return showToast('Enter a valid room code.', 'danger');
     const queuedRoom = state.liveOpenRoomsMap.get(code);
@@ -1668,7 +1791,7 @@ export function initGameBindings() {
 
   document.getElementById('startLocalBtn').addEventListener('click', (e) => {
     const btn = e.currentTarget;
-    if (btn.disabled) return;
+    if (btn.disabled || isUserCurrentlyInMatchOrMatchmaking()) return;
     btn.disabled = true;
     setTimeout(() => { btn.disabled = false; }, 1000);
     cleanupOnlineChannel();
@@ -1773,7 +1896,6 @@ export function initGameBindings() {
     if (btn.disabled) return;
     btn.disabled = true;
     try {
-      // If user leaves while in waiting room, cancel the waiting room cleanly
       if (!state.game && state.waitingRoomState && state.waitingRoomState.status === 'WAITING') {
         await cancelWaitingRoomAndUnlock();
         return;

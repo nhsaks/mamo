@@ -5,6 +5,8 @@ import { fetchRemotePlatformConfig } from './admin.js';
 import {
   isTxLocked,
   startTxCooldown,
+  refreshPendingDWStatus,
+  creditBrokerDepositWithdrawFee,
   showWalletPopup,
   validateWalletActionButtons,
   loadWalletTransactions
@@ -120,11 +122,21 @@ export async function loadBrokerPendingRequests() {
           if (txUpdErr) throw txUpdErr;
         }
 
+        let addedBrokerFee = 0;
+        if (decision === 'approved') {
+          addedBrokerFee = await creditBrokerDepositWithdrawFee(
+            state.account.mobile,
+            amt,
+            txType === 'withdraw_req' ? 'withdraw' : 'deposit',
+            userMobile
+          );
+        }
+
         await refreshAccountBalance(validateWalletActionButtons);
         if (txType === 'withdraw_req' && decision === 'approved' && Number(state.account.coins) <= beforeCoins) {
           const fallbackCoins = (typeof rpcResult === 'number' && Number(rpcResult) > beforeCoins)
-            ? Number(rpcResult)
-            : beforeCoins + amt;
+            ? Number(rpcResult) + addedBrokerFee
+            : beforeCoins + amt + addedBrokerFee;
           await supabase
             .from('mobile_accounts')
             .update({ coins: fallbackCoins })
@@ -135,8 +147,8 @@ export async function loadBrokerPendingRequests() {
 
         sfx.coin();
         showWalletPopup(
-          txType === 'withdraw_req' && decision === 'approved'
-            ? `Withdraw approved! +${amt.toLocaleString()} coins added to your broker wallet.`
+          decision === 'approved'
+            ? `${txType === 'withdraw_req' ? 'Withdraw' : 'Deposit'} approved! Broker fee added: +${addedBrokerFee.toLocaleString()} coins.`
             : `Request ${decision}!`,
           true
         );
@@ -153,6 +165,7 @@ export async function openWalletModal(onRefreshPotPreview) {
   document.getElementById('walletActionPopup').classList.add('hidden');
   await refreshAccountBalance(validateWalletActionButtons);
   await fetchRemotePlatformConfig(onRefreshPotPreview);
+  await refreshPendingDWStatus();
   document.getElementById('walletModal').classList.remove('hidden');
 
   const isAdmin = state.account.role === 'admin';
@@ -187,6 +200,12 @@ export function initBrokerBindings(onRefreshPotPreview) {
 
   document.getElementById('btnSubmitBrokerReq').addEventListener('click', async () => {
     if (isTxLocked()) return;
+    const stillPending = await refreshPendingDWStatus();
+    if (stillPending) {
+      validateWalletActionButtons();
+      return showWalletPopup('You already have a pending deposit or withdraw request.', false);
+    }
+
     const brokerMobile = document.getElementById('brokerMobileInput').value.trim();
     const action = document.getElementById('reqActionType').value;
     const amount = Number(document.getElementById('reqCoinAmount').value);
@@ -257,7 +276,12 @@ export function initBrokerBindings(onRefreshPotPreview) {
             status: 'pending',
             note
           });
-        if (insErr) throw insErr;
+        if (insErr) {
+          if (insErr.code === '23505') {
+            throw new Error('Only one pending deposit or withdraw request is allowed at a time.');
+          }
+          throw insErr;
+        }
       } else if (typeof rpcBal === 'number') {
         state.account.coins = Number(rpcBal);
       }
@@ -272,7 +296,6 @@ export function initBrokerBindings(onRefreshPotPreview) {
         true
       );
       document.getElementById('reqCoinAmount').value = '';
-      validateWalletActionButtons();
       await loadWalletTransactions();
     } catch (err) {
       showWalletPopup(err.message || 'Request failed.', false);
