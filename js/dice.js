@@ -62,18 +62,17 @@ export async function executeDiceRoll(callbacks) {
   clearInterval(flicker);
   diceEl.classList.remove('rolling');
 
-  // Guard if turn timed out or shifted mid-animation
   if (!state.game || state.game.phase === 'GAMEOVER' || state.game.turnSeat !== rollingSeatIdx || (state.game.turnSeq || 1) !== rollTurnSeq) {
     return;
   }
 
   const game = state.game;
   const seatObj = game.seats[rollingSeatIdx];
-  // Check if all active (non-finished) tokens are locked in yard (-1); if so, guarantee a 6 so player can unlock & play
   const allActiveTokensLocked = seatObj && seatObj.tokens.every(p => p === -1 || p === 56) && seatObj.tokens.some(p => p === -1);
   const rolled = allActiveTokensLocked ? 6 : (Math.floor(Math.random() * 6) + 1);
 
   game.diceValue = rolled;
+  game.lastRolledValue = rolled;
   if (seatObj) seatObj.lastDiceRoll = rolled;
   renderDiceFaces(rolled);
   syncGameUI();
@@ -89,6 +88,7 @@ export async function executeDiceRoll(callbacks) {
           seatIndex: rollingSeatIdx,
           turnSeq: rollTurnSeq,
           diceValue: rolled,
+          lastRolledValue: rolled,
           lastDiceRoll: rolled,
           consecutiveSixes: 0,
           validTokens: [],
@@ -109,6 +109,7 @@ export async function executeDiceRoll(callbacks) {
       seatIndex: rollingSeatIdx,
       turnSeq: rollTurnSeq,
       diceValue: rolled,
+      lastRolledValue: rolled,
       lastDiceRoll: rolled,
       consecutiveSixes: nextSixes,
       validTokens: legal,
@@ -144,7 +145,6 @@ export async function executeDiceRoll(callbacks) {
     return;
   }
 
-  // Local Pass & Play mode
   game.consecutiveSixes = nextSixes;
   sfx.diceLand(rolled);
   game.validTokens = legal;

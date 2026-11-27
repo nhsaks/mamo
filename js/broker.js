@@ -6,6 +6,7 @@ import {
   isTxLocked,
   startTxCooldown,
   refreshPendingDWStatus,
+  computeBrokerTxFee,
   creditBrokerDepositWithdrawFee,
   showWalletPopup,
   validateWalletActionButtons,
@@ -57,11 +58,12 @@ export async function loadBrokerPendingRequests() {
       const txType = btn.dataset.type;
       const userMobile = btn.dataset.user;
       const amt = Number(btn.dataset.amt);
+      const { feeCoins, netCoins } = computeBrokerTxFee(amt);
 
       const beforeCoins = Number(state.account.coins || 0);
 
-      if (txType === 'deposit_req' && decision === 'approved' && beforeCoins < amt) {
-        return showWalletPopup(`Broker balance (${beforeCoins}) is less than ${amt} coins deposit!`, false);
+      if (txType === 'deposit_req' && decision === 'approved' && beforeCoins < netCoins) {
+        return showWalletPopup(`Broker balance (${beforeCoins}) is less than ${netCoins} coins deposit!`, false);
       }
 
       startTxCooldown(5);
@@ -81,7 +83,7 @@ export async function loadBrokerPendingRequests() {
               .select('coins')
               .eq('mobile', state.account.mobile)
               .single();
-            const nextBrokerBal = Number(freshBroker?.coins ?? beforeCoins) + amt;
+            const nextBrokerBal = Number(freshBroker?.coins ?? beforeCoins) + netCoins;
             const { error: bUpdErr } = await supabase
               .from('mobile_accounts')
               .update({ coins: nextBrokerBal })
@@ -98,13 +100,13 @@ export async function loadBrokerPendingRequests() {
               .select('coins')
               .eq('mobile', state.account.mobile)
               .single();
-            const nextBrokerBal = Number(freshBroker?.coins ?? beforeCoins) - amt;
+            const nextBrokerBal = Number(freshBroker?.coins ?? beforeCoins) - netCoins;
             if (nextBrokerBal < 0) throw new Error('Insufficient broker balance');
             await supabase.from('mobile_accounts').update({ coins: nextBrokerBal }).eq('mobile', state.account.mobile);
             const { data: uRow } = await supabase.from('mobile_accounts').select('coins').eq('mobile', userMobile).single();
             if (uRow) {
               await supabase.from('mobile_accounts').update({
-                coins: Number(uRow.coins || 0) + amt,
+                coins: Number(uRow.coins || 0) + netCoins,
                 deposited_by_broker: state.account.mobile
               }).eq('mobile', userMobile);
             }
@@ -114,12 +116,26 @@ export async function loadBrokerPendingRequests() {
             .from('mobile_coin_tx')
             .update({
               status: decision,
+              amount: decision === 'approved' ? netCoins : amt,
               tx_type: decision === 'approved'
                 ? (txType === 'withdraw_req' ? 'withdraw_approved' : 'deposit_approved')
                 : txType
             })
             .eq('id', txId);
           if (txUpdErr) throw txUpdErr;
+        } else if (txType === 'deposit_req' && decision === 'approved' && feeCoins > 0) {
+          // If RPC credited full `amt` to user, trim `feeCoins` so user receives `netCoins`
+          const { data: uRow } = await supabase.from('mobile_accounts').select('coins').eq('mobile', userMobile).single();
+          if (uRow) {
+            await supabase
+              .from('mobile_accounts')
+              .update({ coins: Math.max(0, Number(uRow.coins || 0) - feeCoins) })
+              .eq('mobile', userMobile);
+          }
+          await supabase
+            .from('mobile_coin_tx')
+            .update({ amount: netCoins })
+            .eq('id', txId);
         }
 
         let addedBrokerFee = 0;
@@ -136,7 +152,7 @@ export async function loadBrokerPendingRequests() {
         if (txType === 'withdraw_req' && decision === 'approved' && Number(state.account.coins) <= beforeCoins) {
           const fallbackCoins = (typeof rpcResult === 'number' && Number(rpcResult) > beforeCoins)
             ? Number(rpcResult) + addedBrokerFee
-            : beforeCoins + amt + addedBrokerFee;
+            : beforeCoins + netCoins + addedBrokerFee;
           await supabase
             .from('mobile_accounts')
             .update({ coins: fallbackCoins })
@@ -148,7 +164,7 @@ export async function loadBrokerPendingRequests() {
         sfx.coin();
         showWalletPopup(
           decision === 'approved'
-            ? `${txType === 'withdraw_req' ? 'Withdraw' : 'Deposit'} approved! Broker fee added: +${addedBrokerFee.toLocaleString()} coins.`
+            ? `${txType === 'withdraw_req' ? 'Withdraw' : 'Deposit'} approved! Net ${netCoins.toLocaleString()} coins (Fee: ${addedBrokerFee.toLocaleString()}).`
             : `Request ${decision}!`,
           true
         );
@@ -181,9 +197,7 @@ export async function openWalletModal(onRefreshPotPreview) {
     ? 'Admin: Mint & Send Coins to Player'
     : 'Broker: Send Coins to Player';
 
-  document.getElementById('walletTxHeading').textContent = isUser
-    ? 'Last 6 Deposit / Withdraw Transactions'
-    : 'Recent Coin Transactions';
+  document.getElementById('walletTxHeading').textContent = 'Last 6 Coin Transactions';
 
   validateWalletActionButtons();
   if (isBroker) await loadBrokerPendingRequests();

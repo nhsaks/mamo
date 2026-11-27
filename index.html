@@ -200,11 +200,11 @@
           <p class="text-xs text-slate-300 mt-1">Create or join a private friend room. Coins cut only when match starts.</p>
         </div>
         <div class="mt-4 flex flex-col gap-2">
-          <button id="createOnlineRoomBtn" type="button" class="w-full py-2.5 px-3 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-600 text-slate-950 font-extrabold text-xs cursor-pointer">Create Private Room</button>
+          <button id="createOnlineRoomBtn" type="button" class="w-full py-2.5 px-3 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-600 disabled:opacity-45 disabled:cursor-not-allowed text-slate-950 font-extrabold text-xs cursor-pointer">Create Private Room</button>
           <div class="flex gap-1.5">
             <input id="joinRoomCodeInput" type="text" maxlength="5" placeholder="ROOM CODE"
               class="flex-1 bg-slate-950/90 border border-white/15 rounded-xl px-3 py-2 text-xs font-extrabold uppercase tracking-widest text-white outline-none" />
-            <button id="joinOnlineRoomBtn" type="button" class="px-4 py-2 rounded-xl bg-amber-500 text-slate-950 font-extrabold text-xs cursor-pointer">Join</button>
+            <button id="joinOnlineRoomBtn" type="button" class="px-4 py-2 rounded-xl bg-amber-500 disabled:opacity-45 disabled:cursor-not-allowed text-slate-950 font-extrabold text-xs cursor-pointer">Join</button>
           </div>
         </div>
       </div>
@@ -218,7 +218,7 @@
           <h2 class="text-lg font-black text-white mt-2">Pass &amp; Play (No Coins Cut)</h2>
           <p class="text-xs text-slate-300 mt-1">Play locally with 2 or 4 players on one device — 100% free, zero coins deducted.</p>
         </div>
-        <button id="startLocalBtn" type="button" class="mt-4 w-full py-3 rounded-xl bg-gradient-to-r from-purple-400 to-indigo-600 text-white font-extrabold text-xs sm:text-sm cursor-pointer">Start Free Local Table</button>
+        <button id="startLocalBtn" type="button" class="mt-4 w-full py-3 rounded-xl bg-gradient-to-r from-purple-400 to-indigo-600 disabled:opacity-45 disabled:cursor-not-allowed text-white font-extrabold text-xs sm:text-sm cursor-pointer">Start Free Local Table</button>
       </div>
     </section>
   </main>
@@ -254,15 +254,17 @@
     </div>
   </section>
 
-  <!-- ACTIVE GAME VIEW -->
-  <section id="gameView" class="hidden flex-1 w-full max-w-6xl mx-auto px-2 sm:px-4 pb-3 flex flex-col lg:flex-row items-center justify-center gap-2 sm:gap-4 overflow-hidden">
-    <div class="w-full lg:w-60 flex flex-row lg:flex-col justify-between gap-2 order-1">
-      <div id="playerCard-0" class="flex-1 glass-panel rounded-2xl p-2.5 sm:p-3 border-2 border-transparent transition-all relative"></div>
-      <div id="playerCard-1" class="flex-1 glass-panel rounded-2xl p-2.5 sm:p-3 border-2 border-transparent transition-all relative"></div>
+  <!-- ACTIVE GAME VIEW: Top row = Green (1) & Yellow (2), Bottom row = Red (0) & Blue (3) -->
+  <section id="gameView" class="hidden flex-1 w-full max-w-4xl mx-auto px-2 sm:px-4 pb-3 flex flex-col items-center justify-center gap-2 overflow-hidden">
+    <!-- TOP SEATS ROW: Green (Top-Left) & Yellow (Top-Right) -->
+    <div class="w-full max-w-[560px] flex flex-row justify-between gap-2">
+      <div id="playerCard-1" class="flex-1 glass-panel rounded-2xl p-2 sm:p-2.5 border-2 border-transparent transition-all relative"></div>
+      <div id="playerCard-2" class="flex-1 glass-panel rounded-2xl p-2 sm:p-2.5 border-2 border-transparent transition-all relative"></div>
     </div>
 
-    <div class="flex flex-col items-center justify-center order-2 relative">
-      <div class="mb-2 flex items-center gap-2 sm:gap-3 bg-slate-950/85 border border-amber-500/35 px-3.5 py-1 rounded-full">
+    <!-- BOARD + HUD -->
+    <div class="flex flex-col items-center justify-center relative">
+      <div class="mb-1.5 flex items-center gap-2 sm:gap-3 bg-slate-950/85 border border-amber-500/35 px-3.5 py-1 rounded-full">
         <span class="text-[11px] uppercase font-bold text-slate-400">Pot:</span>
         <span id="activePotDisplay" class="text-xs sm:text-sm font-black text-amber-300 tabular-nums">20</span>
         <span class="text-slate-600">|</span>
@@ -278,28 +280,29 @@
       </div>
     </div>
 
-    <div class="w-full lg:w-60 flex flex-col gap-2 order-3">
-      <div class="flex flex-row lg:flex-col justify-between gap-2">
-        <div id="playerCard-2" class="flex-1 glass-panel rounded-2xl p-2.5 sm:p-3 border-2 border-transparent transition-all relative"></div>
-        <div id="playerCard-3" class="flex-1 glass-panel rounded-2xl p-2.5 sm:p-3 border-2 border-transparent transition-all relative"></div>
+    <!-- BOTTOM SEATS ROW: Red (Bottom-Left) & Blue (Bottom-Right) -->
+    <div class="w-full max-w-[560px] flex flex-row justify-between gap-2">
+      <div id="playerCard-0" class="flex-1 glass-panel rounded-2xl p-2 sm:p-2.5 border-2 border-transparent transition-all relative"></div>
+      <div id="playerCard-3" class="flex-1 glass-panel rounded-2xl p-2 sm:p-2.5 border-2 border-transparent transition-all relative"></div>
+    </div>
+
+    <!-- DICE & EMOJI CONTROLS -->
+    <div class="w-full max-w-[560px] glass-panel rounded-2xl p-2.5 sm:p-3 flex items-center justify-between gap-3">
+      <div class="flex items-center gap-3">
+        <div id="diceBtn" class="dice-box active-turn" role="button" tabindex="0" aria-label="Roll Dice">
+          <span class="pip" data-pip="0"></span><span class="pip" data-pip="1"></span><span class="pip" data-pip="2"></span>
+          <span class="pip" data-pip="3"></span><span class="pip" data-pip="4"></span><span class="pip" data-pip="5"></span>
+          <span class="pip" data-pip="6"></span><span class="pip" data-pip="7"></span><span class="pip" data-pip="8"></span>
+        </div>
+        <div>
+          <button id="rollActionBtn" type="button" class="px-3.5 py-2 rounded-xl bg-gradient-to-r from-amber-400 to-amber-500 text-slate-950 font-black text-xs uppercase cursor-pointer">Roll Dice</button>
+          <p id="sixStreakText" class="text-[10px] text-slate-400 font-semibold mt-1">30s turn • <span id="maxMissHudText">5</span> miss = OUT</p>
+        </div>
       </div>
-      <div class="glass-panel rounded-2xl p-2.5 sm:p-3.5 flex items-center justify-between gap-3">
-        <div class="flex items-center gap-3">
-          <div id="diceBtn" class="dice-box active-turn" role="button" tabindex="0" aria-label="Roll Dice">
-            <span class="pip" data-pip="0"></span><span class="pip" data-pip="1"></span><span class="pip" data-pip="2"></span>
-            <span class="pip" data-pip="3"></span><span class="pip" data-pip="4"></span><span class="pip" data-pip="5"></span>
-            <span class="pip" data-pip="6"></span><span class="pip" data-pip="7"></span><span class="pip" data-pip="8"></span>
-          </div>
-          <div>
-            <button id="rollActionBtn" type="button" class="px-3.5 py-2 rounded-xl bg-gradient-to-r from-amber-400 to-amber-500 text-slate-950 font-black text-xs uppercase cursor-pointer">Roll Dice</button>
-            <p id="sixStreakText" class="text-[10px] text-slate-400 font-semibold mt-1">30s turn • <span id="maxMissHudText">5</span> miss = OUT</p>
-          </div>
-        </div>
-        <div class="flex items-center gap-1">
-          <button data-emoji="👏" type="button" class="emoji-btn w-8 h-8 rounded-lg bg-slate-800/90 text-base flex items-center justify-center cursor-pointer">👏</button>
-          <button data-emoji="🔥" type="button" class="emoji-btn w-8 h-8 rounded-lg bg-slate-800/90 text-base flex items-center justify-center cursor-pointer">🔥</button>
-          <button data-emoji="😱" type="button" class="emoji-btn w-8 h-8 rounded-lg bg-slate-800/90 text-base flex items-center justify-center cursor-pointer">😱</button>
-        </div>
+      <div class="flex items-center gap-1">
+        <button data-emoji="👏" type="button" class="emoji-btn w-8 h-8 rounded-lg bg-slate-800/90 text-base flex items-center justify-center cursor-pointer">👏</button>
+        <button data-emoji="🔥" type="button" class="emoji-btn w-8 h-8 rounded-lg bg-slate-800/90 text-base flex items-center justify-center cursor-pointer">🔥</button>
+        <button data-emoji="😱" type="button" class="emoji-btn w-8 h-8 rounded-lg bg-slate-800/90 text-base flex items-center justify-center cursor-pointer">😱</button>
       </div>
     </div>
   </section>
@@ -420,7 +423,7 @@
         <div class="flex items-center justify-between mb-3">
           <h3 id="transferBoxTitle" class="text-sm font-black text-amber-300">Send Coins to Player</h3>
           <span class="text-[10px] font-bold text-amber-300 bg-amber-500/15 border border-amber-400/30 px-2 py-0.5 rounded-full">
-            Min Limit: <span class="minLimitDisplayText">500</span> Coins
+            Min Limit: <span class="minLimitDisplayText">500</span> Coins • Fee: <span class="brokerTxFeeDisplayText">5%</span>
           </span>
         </div>
         <div class="grid grid-cols-1 sm:grid-cols-3 gap-2">
@@ -474,10 +477,10 @@
         <div id="brokerPendingList" class="space-y-2 text-xs"></div>
       </div>
 
-      <!-- TRANSACTION HISTORY -->
+      <!-- TRANSACTION HISTORY (LAST 6 FOR BOTH USER & BROKER) -->
       <div class="mt-4 bg-slate-900/90 border border-white/10 rounded-2xl p-4">
         <div class="flex items-center justify-between mb-2">
-          <h3 id="walletTxHeading" class="text-sm font-black text-slate-200">Coin Transactions</h3>
+          <h3 id="walletTxHeading" class="text-sm font-black text-slate-200">Last 6 Coin Transactions</h3>
           <button id="refreshWalletDataBtn" type="button" class="text-[11px] px-2.5 py-1 rounded-lg bg-slate-800 text-slate-300 font-bold cursor-pointer">Refresh</button>
         </div>
         <div class="overflow-x-auto">

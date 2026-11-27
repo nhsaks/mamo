@@ -190,9 +190,15 @@ export async function creditWalletCoinsReliable(targetMobile, amount, txType, no
   }
 }
 
-export async function creditBrokerDepositWithdrawFee(brokerMobile, baseAmount, kindLabel, userMobile) {
+export function computeBrokerTxFee(baseAmount) {
   const feePct = Number(state.platformConfig.brokerTxFeePct ?? 5);
   const feeCoins = Math.floor((Number(baseAmount || 0) * feePct) / 100);
+  const netCoins = Math.max(0, Number(baseAmount || 0) - feeCoins);
+  return { feePct, feeCoins, netCoins };
+}
+
+export async function creditBrokerDepositWithdrawFee(brokerMobile, baseAmount, kindLabel, userMobile) {
+  const { feePct, feeCoins } = computeBrokerTxFee(baseAmount);
   if (!brokerMobile || feeCoins <= 0) return 0;
 
   await creditWalletCoinsReliable(
@@ -357,11 +363,19 @@ export async function loadWalletTransactions() {
     .limit(30);
 
   let rows = data || [];
-  if (state.account.role === 'user') {
-    const depositWithdrawTypes = new Set(['deposit_req', 'withdraw_req', 'deposit_approved', 'withdraw_approved']);
-    rows = rows.filter(tx => depositWithdrawTypes.has(tx.tx_type)).slice(0, 6);
+  if (state.account.role === 'user' || state.account.role === 'broker') {
+    const allowedTypes = new Set([
+      'deposit_req',
+      'withdraw_req',
+      'deposit_approved',
+      'withdraw_approved',
+      'broker_transfer',
+      'transfer'
+    ]);
+    const filtered = rows.filter(tx => allowedTypes.has(tx.tx_type));
+    rows = (filtered.length > 0 ? filtered : rows).slice(0, 6);
   } else {
-    rows = rows.slice(0, 15);
+    rows = rows.slice(0, 6);
   }
 
   const tbody = document.getElementById('walletTxBody');
@@ -411,30 +425,90 @@ export function initCoinTransferBindings() {
     startTxCooldown(5);
 
     try {
-      const { data: newBal, error } = await supabase.rpc('mobile_transfer_by_phone', {
-        p_sender_mobile: state.account.mobile,
-        p_device_hash: state.deviceHash,
-        p_receiver_mobile: receiverMobile,
-        p_amount: amount,
-        p_note: note
-      });
+      const isBrokerSending = state.account.role === 'broker';
+      const { feePct, feeCoins, netCoins } = isBrokerSending
+        ? computeBrokerTxFee(amount)
+        : { feePct: 0, feeCoins: 0, netCoins: amount };
 
-      if (error) throw error;
-
-      if (state.account.role === 'broker') {
-        await supabase
+      if (isBrokerSending) {
+        const { data: senderRow, error: sErr } = await supabase
           .from('mobile_accounts')
-          .update({ deposited_by_broker: state.account.mobile })
+          .select('coins')
+          .eq('mobile', state.account.mobile)
+          .single();
+        if (sErr || !senderRow) throw new Error('Unable to read broker balance.');
+        const senderCoins = Number(senderRow.coins || 0);
+        if (senderCoins < amount) {
+          throw new Error(`Insufficient broker balance (${senderCoins} < ${amount}).`);
+        }
+
+        const { data: recvRow, error: rErr } = await supabase
+          .from('mobile_accounts')
+          .select('coins')
+          .eq('mobile', receiverMobile)
+          .single();
+        if (rErr || !recvRow) throw new Error(`Recipient ${receiverMobile} not found.`);
+
+        // Deduct full sent amount from broker, credit netCoins (with fee cut) to user
+        const nextSenderCoins = senderCoins - amount + feeCoins;
+        const { error: bUpdErr } = await supabase
+          .from('mobile_accounts')
+          .update({ coins: nextSenderCoins })
+          .eq('mobile', state.account.mobile);
+        if (bUpdErr) throw bUpdErr;
+
+        const nextUserCoins = Number(recvRow.coins || 0) + netCoins;
+        const { error: uUpdErr } = await supabase
+          .from('mobile_accounts')
+          .update({
+            coins: nextUserCoins,
+            deposited_by_broker: state.account.mobile
+          })
           .eq('mobile', receiverMobile);
+        if (uUpdErr) throw uUpdErr;
+
+        await supabase.from('mobile_coin_tx').insert({
+          sender_mobile: state.account.mobile,
+          receiver_mobile: receiverMobile,
+          amount: netCoins,
+          tx_type: 'deposit_approved',
+          status: 'completed',
+          note: note ? `${note} (Gross ${amount}, Fee -${feeCoins})` : `Broker deposit (${feePct}% fee cut: -${feeCoins})`
+        });
+
+        if (feeCoins > 0) {
+          await supabase.from('mobile_coin_tx').insert({
+            sender_mobile: receiverMobile,
+            receiver_mobile: state.account.mobile,
+            amount: feeCoins,
+            tx_type: 'broker_fee',
+            status: 'completed',
+            note: `Broker deposit fee (${feePct}% of ${amount})`
+          });
+        }
+      } else {
+        const { data: newBal, error } = await supabase.rpc('mobile_transfer_by_phone', {
+          p_sender_mobile: state.account.mobile,
+          p_device_hash: state.deviceHash,
+          p_receiver_mobile: receiverMobile,
+          p_amount: amount,
+          p_note: note
+        });
+        if (error) throw error;
+        if (newBal !== null && state.account.role === 'broker') {
+          state.account.coins = Number(newBal);
+        }
       }
 
-      if (state.account.role === 'broker' && newBal !== null) {
-        state.account.coins = Number(newBal);
-      }
       await refreshAccountBalance(validateWalletActionButtons);
       syncAccountUI(validateWalletActionButtons);
       sfx.coin();
-      showWalletPopup(`Sent ${amount.toLocaleString()} coins to ${receiverMobile}!`, true);
+      showWalletPopup(
+        isBrokerSending
+          ? `Sent ${amount.toLocaleString()} coins! User got ${netCoins.toLocaleString()} coins (${feeCoins.toLocaleString()} broker fee cut).`
+          : `Sent ${amount.toLocaleString()} coins to ${receiverMobile}!`,
+        true
+      );
       document.getElementById('transferAmountInput').value = '';
       validateWalletActionButtons();
       await loadWalletTransactions();
