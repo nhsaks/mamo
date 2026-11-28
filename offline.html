@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>No Internet — Ludo Royale</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
+  <style>
+    * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; user-select: none; }
+    html, body {
+      margin: 0; padding: 0; width: 100%; height: 100%;
+      font-family: 'Inter', sans-serif;
+      background: radial-gradient(circle at 50% 15%, #132a2e 0%, #091318 65%, #050a0e 100%);
+      color: #f8fafc; overflow-x: hidden;
+    }
+    .bg-felt {
+      background-image:
+        radial-gradient(rgba(255, 255, 255, 0.03) 1px, transparent 0),
+        radial-gradient(rgba(16, 185, 129, 0.05) 1px, transparent 0);
+      background-size: 24px 24px;
+      background-position: 0 0, 12px 12px;
+    }
+    .glass-panel {
+      background: rgba(15, 23, 42, 0.85);
+      backdrop-filter: blur(14px);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      box-shadow: 0 20px 45px rgba(0, 0, 0, 0.55);
+    }
+    @keyframes signalPulse {
+      0%, 100% { transform: scale(1); opacity: 0.9; }
+      50% { transform: scale(1.06); opacity: 0.55; }
+    }
+    .offline-pulse { animation: signalPulse 2.2s ease-in-out infinite; }
+    @keyframes spinOnce {
+      to { transform: rotate(360deg); }
+    }
+    .spin-icon { animation: spinOnce 0.7s linear infinite; }
+  </style>
+</head>
+<body class="bg-felt flex flex-col min-h-screen">
+
+  <!-- HEADER (Matches Ludo Royale) -->
+  <header class="w-full max-w-6xl mx-auto px-3 sm:px-6 pt-3 pb-2 flex items-center justify-between gap-2 z-20">
+    <div class="flex items-center gap-2.5">
+      <div class="w-9 h-9 sm:w-10 sm:h-10 rounded-xl bg-gradient-to-br from-amber-400 via-amber-500 to-orange-600 flex items-center justify-center shadow-lg">
+        <svg class="w-6 h-6 text-slate-950" viewBox="0 0 24 24" fill="currentColor">
+          <path d="M5 16L3 5l5.5 5L12 4l3.5 6L21 5l-2 11H5zm14 3c0 .6-.4 1-1 1H6c-.6 0-1-.4-1-1v-1h14v1z"/>
+        </svg>
+      </div>
+      <div>
+        <h1 class="text-base sm:text-xl font-black tracking-tight bg-gradient-to-r from-amber-200 via-yellow-400 to-amber-500 bg-clip-text text-transparent leading-none">
+          LUDO ROYALE
+        </h1>
+        <p class="text-[11px] text-rose-400 font-semibold mt-0.5 flex items-center gap-1.5">
+          <span class="w-1.5 h-1.5 rounded-full bg-rose-400 inline-block animate-ping"></span>
+          <span>Offline Mode</span>
+        </p>
+      </div>
+    </div>
+
+    <span id="connStatusPill" class="px-3 py-1 rounded-full text-[10px] font-black uppercase bg-rose-500/20 text-rose-300 border border-rose-400/35">
+      Disconnected
+    </span>
+  </header>
+
+  <!-- MAIN NO INTERNET CARD -->
+  <main class="flex-1 w-full max-w-md mx-auto px-4 py-6 flex flex-col justify-center">
+    <div class="glass-panel rounded-3xl p-6 sm:p-8 text-center border border-amber-400/25 relative overflow-hidden">
+      
+      <!-- Top Status Badge -->
+      <span class="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-[10px] font-extrabold uppercase tracking-wider bg-rose-500/15 text-rose-300 border border-rose-400/30">
+        Connection Lost
+      </span>
+
+      <!-- Icon Emblem -->
+      <div class="w-20 h-20 mx-auto mt-4 rounded-2xl bg-slate-950/90 border border-amber-400/35 flex items-center justify-center shadow-xl offline-pulse">
+        <svg class="w-10 h-10 text-amber-400" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M3 3l18 18M8.53 16.11a6 6 0 016.95 0M5.06 12.64a10.94 10.94 0 015.17-2.39m4.12.24a10.94 10.94 0 014.59 2.15M1.42 9a15.91 15.91 0 014.7-2.88m5.88-1.12a15.93 15.93 0 0110.58 4M12 20h.01" />
+        </svg>
+      </div>
+
+      <!-- Heading & Description -->
+      <h2 class="text-2xl sm:text-3xl font-black text-white mt-4">No Internet Connection</h2>
+      <p id="offlineDescText" class="text-xs sm:text-sm text-slate-300 mt-2 leading-relaxed">
+        Unable to reach <strong class="text-amber-300">Ludo Royale</strong> servers. Check your Wi-Fi or mobile data and tap refresh to reconnect.
+      </p>
+
+      <!-- Quick Troubleshooting Checklist -->
+      <div class="mt-5 bg-slate-950/80 border border-white/10 rounded-2xl p-3.5 text-left space-y-2 text-xs text-slate-300">
+        <div class="flex items-center gap-2">
+          <span class="w-2 h-2 rounded-full bg-amber-400 shrink-0"></span>
+          <span>Verify Wi-Fi or mobile data is turned on</span>
+        </div>
+        <div class="flex items-center gap-2">
+          <span class="w-2 h-2 rounded-full bg-emerald-400 shrink-0"></span>
+          <span>Active online matches auto-rejoin once back online</span>
+        </div>
+      </div>
+
+      <!-- Feedback Banner -->
+      <div id="retryStatusMsg" class="hidden mt-4 px-3 py-2 rounded-xl text-xs font-bold bg-rose-950/80 border border-rose-400/40 text-rose-200"></div>
+
+      <!-- Refresh Button -->
+      <button id="refreshConnBtn" type="button"
+        class="mt-6 w-full py-3.5 px-4 rounded-xl bg-gradient-to-r from-amber-400 to-amber-500 hover:from-amber-300 hover:to-amber-400 active:scale-[0.99] disabled:opacity-60 text-slate-950 font-black text-sm shadow-lg cursor-pointer flex items-center justify-center gap-2 transition">
+        <svg id="refreshSpinnerIcon" class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+        </svg>
+        <span id="refreshBtnLabel">Refresh Connection</span>
+      </button>
+
+    </div>
+  </main>
+
+  <script>
+    const refreshBtn = document.getElementById('refreshConnBtn');
+    const spinnerIcon = document.getElementById('refreshSpinnerIcon');
+    const btnLabel = document.getElementById('refreshBtnLabel');
+    const statusMsg = document.getElementById('retryStatusMsg');
+    const statusPill = document.getElementById('connStatusPill');
+
+    function setOnlineUIAndReload() {
+      statusPill.textContent = 'Connected';
+      statusPill.className = 'px-3 py-1 rounded-full text-[10px] font-black uppercase bg-emerald-500/20 text-emerald-300 border border-emerald-400/35';
+      statusMsg.textContent = '✅ Internet restored! Reloading Ludo Royale...';
+      statusMsg.className = 'mt-4 px-3 py-2 rounded-xl text-xs font-bold bg-emerald-950/85 border border-emerald-400/50 text-emerald-200';
+      statusMsg.classList.remove('hidden');
+      setTimeout(() => {
+        // Redirect back to main index.html or reload current route
+        if (window.location.pathname.endsWith('offline.html')) {
+          window.location.href = './index.html';
+        } else {
+          window.location.reload();
+        }
+      }, 600);
+    }
+
+    async function checkInternetAndRefresh() {
+      refreshBtn.disabled = true;
+      spinnerIcon.classList.add('spin-icon');
+      btnLabel.textContent = 'Checking Connection...';
+      statusMsg.classList.add('hidden');
+
+      try {
+        // Lightweight connectivity probe (avoids cached responses)
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 3500);
+        await fetch('./index.html?ping=' + Date.now(), {
+          method: 'HEAD',
+          cache: 'no-store',
+          signal: controller.signal
+        });
+        clearTimeout(timeout);
+
+        if (navigator.onLine) {
+          setOnlineUIAndReload();
+          return;
+        }
+      } catch (_) {
+        // Still offline
+      }
+
+      spinnerIcon.classList.remove('spin-icon');
+      btnLabel.textContent = 'Refresh Connection';
+      refreshBtn.disabled = false;
+      statusMsg.textContent = '❌ Still offline. Please check your network and try again.';
+      statusMsg.classList.remove('hidden');
+    }
+
+    refreshBtn.addEventListener('click', checkInternetAndRefresh);
+
+    // Automatically recover the moment the device reconnects
+    window.addEventListener('online', setOnlineUIAndReload);
+  </script>
+</body>
+</html>
