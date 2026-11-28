@@ -2,7 +2,9 @@ import {
   supabase,
   state,
   showToast,
-  ACTIVE_GAME_KEY
+  ACTIVE_GAME_KEY,
+  SUPABASE_ANON_KEY,
+  MATCH_STATE_EDGE_FUNCTION_URL
 } from './supabase.js';
 import { sfx } from './sound.js';
 import { refreshAccountBalance } from './player.js';
@@ -46,18 +48,6 @@ function getMaxMissedTurns() {
   return Number.isFinite(n) && n >= 1 ? n : 5;
 }
 
-function hasSavedActiveBoard() {
-  try {
-    const raw = localStorage.getItem(ACTIVE_GAME_KEY);
-    if (!raw) return false;
-    const snap = JSON.parse(raw);
-    const mySeat = snap?.game?.seats?.[snap?.mySeatIndex];
-    return Boolean(snap?.game && snap.game.phase !== 'GAMEOVER' && mySeat && !mySeat.eliminated);
-  } catch (e) {
-    return false;
-  }
-}
-
 export function getMasterClientMobile(game = state.game) {
   if (!game || game.mode !== 'online' || !Array.isArray(game.activeSeats)) return null;
   const aliveMobiles = game.activeSeats
@@ -77,7 +67,7 @@ export function isCurrentUserMasterClient(game = state.game) {
 export function isUserCurrentlyInMatchOrMatchmaking() {
   const activeGame = Boolean(state.game && state.game.phase !== 'GAMEOVER');
   const activeWaiting = Boolean(state.waitingRoomState && state.waitingRoomState.status === 'WAITING');
-  return activeGame || activeWaiting || Boolean(state.autoMatchLocked) || hasSavedActiveBoard();
+  return activeGame || activeWaiting || Boolean(state.autoMatchLocked);
 }
 
 function requestRejoinSyncState() {
@@ -152,31 +142,61 @@ const RTC_ICE_CONFIG = {
 const rtcPeers = new Map();
 let signalingUnsubscribeTimer = null;
 
+function hasOpenP2PForAllOpponents() {
+  if (!state.game || state.game.mode !== 'online' || !Array.isArray(state.game.seats)) return false;
+  const opponents = state.game.seats.filter(
+    s => s && !s.eliminated && s.mobile && s.mobile !== 'LOCAL' && s.mobile !== state.account.mobile
+  );
+  if (opponents.length === 0) return false;
+  return opponents.every(opp => {
+    const peer = rtcPeers.get(opp.mobile);
+    return Boolean(peer && peer.dc && peer.dc.readyState === 'open');
+  });
+}
+
+function releaseMatchRealtimeChannelIfP2PReady() {
+  if (!hasOpenP2PForAllOpponents() || !state.realtimeChannel) return;
+  if (signalingUnsubscribeTimer) clearTimeout(signalingUnsubscribeTimer);
+  signalingUnsubscribeTimer = setTimeout(() => {
+    if (hasOpenP2PForAllOpponents() && state.realtimeChannel) {
+      supabase.removeChannel(state.realtimeChannel);
+      state.realtimeChannel = null;
+    }
+  }, 400);
+}
+
+async function syncStateViaEdgeFunction(publicState) {
+  if (!MATCH_STATE_EDGE_FUNCTION_URL || !state.onlineRoomCode) return;
+  try {
+    await fetch(MATCH_STATE_EDGE_FUNCTION_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${SUPABASE_ANON_KEY}`
+      },
+      body: JSON.stringify({
+        roomCode: state.onlineRoomCode,
+        playerMobile: state.account.mobile,
+        gameState: publicState
+      })
+    });
+  } catch (e) {}
+}
+
 export function updateAutoMatchButtonState() {
   const btn = document.getElementById('startAutoMatchBtn');
-  const createBtn = document.getElementById('createOnlineRoomBtn');
-  const joinBtn = document.getElementById('joinOnlineRoomBtn');
-  const localBtn = document.getElementById('startLocalBtn');
-  const busy = isUserCurrentlyInMatchOrMatchmaking();
-
-  if (createBtn) createBtn.disabled = busy;
-  if (joinBtn) joinBtn.disabled = busy;
-  if (localBtn) localBtn.disabled = busy;
-
   if (!btn) return;
+  const busy = isUserCurrentlyInMatchOrMatchmaking();
   btn.disabled = busy;
   if (state.waitingRoomState && state.waitingRoomState.status === 'WAITING') {
     btn.innerHTML = `⏳ Auto-Matching (${matchmakingSecondsLeft}s)...`;
   } else if (state.game && state.game.phase !== 'GAMEOVER') {
-    btn.innerHTML = `🎲 Active Game`;
-  } else if (hasSavedActiveBoard()) {
-    btn.innerHTML = `⚡ Active Board`;
+    btn.innerHTML = `🎲 In Match`;
   } else if (state.autoMatchLocked) {
     btn.innerHTML = `⏳ Matching Locked...`;
   } else {
     btn.innerHTML = `⚡ Auto Match (<span id="autoMatchBtnLabel">${state.selectedPlayerCount}P • ${state.selectedStake}</span>)`;
   }
-  renderHomeQueueBoards();
 }
 
 export function renderStakeButtons() {
@@ -237,6 +257,9 @@ export async function switchView(viewName) {
   }
 }
 
+// ---------------------------------------------------------
+// WEBRTC P2P MESH + MASTER CLIENT SYNC
+// ---------------------------------------------------------
 function updateP2PStatusBadge() {
   const badge = document.getElementById('p2pStatusBadge');
   if (!badge) return;
@@ -290,6 +313,7 @@ function bindDataChannelHandlers(peerMobile, dc) {
     const entry = rtcPeers.get(peerMobile);
     if (entry) entry.connected = true;
     updateP2PStatusBadge();
+    releaseMatchRealtimeChannelIfP2PReady();
 
     if (state.game && state.game.mode === 'online' && !awaitingRejoinSync && isCurrentUserMasterClient(state.game)) {
       sendMatchEvent('rejoin_sync_state', {
@@ -417,8 +441,10 @@ export function sendMatchEvent(event, payload, targetMobile = null) {
       needsSupabaseFallback = true;
     }
   } else if (state.game && Array.isArray(state.game.seats)) {
-    const opponents = state.game.seats.filter(s => s && s.mobile && s.mobile !== 'LOCAL' && s.mobile !== state.account.mobile);
-    if (opponents.length === 0) return Promise.resolve();
+    const opponents = state.game.seats.filter(
+      s => s && !s.eliminated && s.mobile && s.mobile !== 'LOCAL' && s.mobile !== state.account.mobile
+    );
+    if (opponents.length === 0) return Promise.resolve('ok');
     opponents.forEach(opp => {
       const peer = rtcPeers.get(opp.mobile);
       if (peer && peer.dc && peer.dc.readyState === 'open') {
@@ -431,10 +457,14 @@ export function sendMatchEvent(event, payload, targetMobile = null) {
     needsSupabaseFallback = true;
   }
 
-  if (needsSupabaseFallback && state.realtimeChannel) {
+  if (!needsSupabaseFallback) {
+    return Promise.resolve('ok');
+  }
+
+  if (state.realtimeChannel) {
     return state.realtimeChannel.send({ type: 'broadcast', event, payload });
   }
-  return Promise.resolve();
+  return Promise.resolve('ok');
 }
 
 export function cleanupOnlineChannel() {
@@ -570,10 +600,8 @@ async function updateLobbyPresenceRoom(roomObj) {
 function renderHomeQueueBoards() {
   const q2List = document.getElementById('liveQueue2List');
   const q4List = document.getElementById('liveQueue4List');
-  if (!q2List || !q4List) return;
   const rooms2 = [];
   const rooms4 = [];
-  const playerBusy = isUserCurrentlyInMatchOrMatchmaking();
 
   state.liveOpenRoomsMap.forEach(r => {
     if (r.playerCount === 2) rooms2.push(r);
@@ -592,7 +620,6 @@ function renderHomeQueueBoards() {
     rooms.forEach(r => {
       const filled = r.seats.filter(Boolean).length;
       const isMyOwn = r.hostMobile === state.account.mobile;
-      const btnDisabled = !isMyOwn && playerBusy;
       const row = document.createElement('div');
       row.className = 'flex items-center justify-between bg-slate-900 border border-white/10 rounded-lg px-3 py-2';
       row.innerHTML = `
@@ -600,8 +627,8 @@ function renderHomeQueueBoards() {
           <div class="font-bold text-white">${r.hostName || 'Player'}'s Table <span class="text-amber-300">(${r.stake} Coins)</span></div>
           <div class="text-[10px] text-slate-400">Players: <strong class="text-emerald-300">${filled}/${r.playerCount}</strong> • Pot: ${r.pot}</div>
         </div>
-        <button type="button" ${btnDisabled ? 'disabled' : ''} class="px-3 py-1.5 rounded-lg ${isMyOwn ? 'bg-slate-700 text-amber-300' : 'bg-emerald-500 hover:bg-emerald-400 text-slate-950 disabled:opacity-45 disabled:cursor-not-allowed'} font-black text-[11px] cursor-pointer">
-          ${isMyOwn ? 'Resume Wait' : (playerBusy ? 'In Game' : 'Join Now')}
+        <button type="button" class="px-3 py-1.5 rounded-lg ${isMyOwn ? 'bg-slate-700 text-amber-300' : 'bg-emerald-500 hover:bg-emerald-400 text-slate-950'} font-black text-[11px] cursor-pointer">
+          ${isMyOwn ? 'Resume Wait' : 'Join Now'}
         </button>
       `;
       row.querySelector('button').addEventListener('click', async () => {
@@ -611,7 +638,7 @@ function renderHomeQueueBoards() {
           return;
         }
         if (isUserCurrentlyInMatchOrMatchmaking()) {
-          return showToast('Cannot join while you have an active game board.', 'danger');
+          return showToast('Finish or leave your current match/matchmaking first.', 'danger');
         }
         if (Number(state.account.coins) < Number(r.stake)) {
           return showToast(`Need at least ${r.stake} coins to join this match.`, 'danger');
@@ -729,7 +756,6 @@ function createInitialGameState({ mode, playerCount, stake, seats }) {
     turnStartedAt: Date.now(),
     phase: 'ROLL',
     diceValue: null,
-    lastRolledValue: 6,
     consecutiveSixes: 0,
     validTokens: [],
     winnerSeat: null,
@@ -817,7 +843,10 @@ function pushOnlineState(reliable = false) {
       ...state.game,
       validTokens: []
     };
-    if (reliable && state.realtimeChannel) {
+    if (MATCH_STATE_EDGE_FUNCTION_URL) {
+      syncStateViaEdgeFunction(publicState);
+    }
+    if (reliable && !hasOpenP2PForAllOpponents() && state.realtimeChannel) {
       return state.realtimeChannel.send({
         type: 'broadcast',
         event: 'game_state',
@@ -826,7 +855,7 @@ function pushOnlineState(reliable = false) {
     }
     return sendMatchEvent('game_state', publicState);
   }
-  return Promise.resolve();
+  return Promise.resolve('ok');
 }
 
 export async function forfeitCurrentPlayer() {
@@ -875,7 +904,7 @@ export async function forfeitCurrentPlayer() {
 
   syncGameUI();
   const sendStatus = await pushOnlineState(true);
-  if (game.mode === 'online' && state.realtimeChannel && sendStatus !== 'ok') {
+  if (game.mode === 'online' && !hasOpenP2PForAllOpponents() && state.realtimeChannel && sendStatus && sendStatus !== 'ok') {
     throw new Error(`Forfeit broadcast failed (${sendStatus}).`);
   }
 }
@@ -889,7 +918,6 @@ function sendPrivateDiceRollToRoller(seatObj, rolled, streak, legal, phase) {
       targetMobile: seatObj.mobile,
       turnSeq: state.game.turnSeq,
       diceValue: rolled,
-      lastRolledValue: rolled,
       consecutiveSixes: streak,
       validTokens: legal,
       phase
@@ -929,7 +957,6 @@ function handleIncomingMatchEvent(event, payload, isRejoinSync = false) {
     if (!state.game || state.game.phase === 'GAMEOVER') return;
     const { seatIndex, diceValue, turnSeq } = payload;
     if (typeof turnSeq === 'number' && typeof state.game.turnSeq === 'number' && turnSeq < state.game.turnSeq) return;
-    state.game.lastRolledValue = payload.lastRolledValue ?? diceValue;
     if (typeof seatIndex === 'number' && state.game.seats[seatIndex]) {
       state.game.seats[seatIndex].lastDiceRoll = diceValue;
     }
@@ -944,7 +971,7 @@ function handleIncomingMatchEvent(event, payload, isRejoinSync = false) {
       if (typeof payload.consecutiveSixes === 'number') {
         state.game.consecutiveSixes = payload.consecutiveSixes;
       }
-      renderDiceFaces(state.game.lastRolledValue ?? 6);
+      renderDiceFaces(diceValue);
     }
     syncGameUI();
     persistActiveMatchSnapshot();
@@ -956,14 +983,13 @@ function handleIncomingMatchEvent(event, payload, isRejoinSync = false) {
     if (!state.game || state.game.phase === 'GAMEOVER') return;
     if (typeof payload.turnSeq === 'number' && typeof state.game.turnSeq === 'number' && payload.turnSeq < state.game.turnSeq) return;
     state.game.diceValue = payload.diceValue;
-    state.game.lastRolledValue = payload.lastRolledValue ?? payload.diceValue;
     if (state.game.seats[state.game.turnSeat]) {
       state.game.seats[state.game.turnSeat].lastDiceRoll = payload.diceValue;
     }
     state.game.consecutiveSixes = payload.consecutiveSixes;
     state.game.validTokens = payload.validTokens || [];
     state.game.phase = payload.phase;
-    renderDiceFaces(state.game.lastRolledValue ?? 6);
+    renderDiceFaces(payload.diceValue);
     syncGameUI();
     persistActiveMatchSnapshot();
     return;
@@ -983,16 +1009,12 @@ function handleIncomingMatchEvent(event, payload, isRejoinSync = false) {
       if (awaitingRejoinSync && !isRejoinSync && incomingSeq <= localSeq) return;
 
       const prevDice = state.game.diceValue;
-      const prevLastRolled = state.game.lastRolledValue;
       const prevValid = state.game.validTokens;
       const prevPhase = state.game.phase;
       const prevSeats = state.game.seats;
       const prevTurnSeat = state.game.turnSeat;
 
       state.game = payload;
-      if (state.game.lastRolledValue == null) {
-        state.game.lastRolledValue = prevLastRolled ?? prevDice ?? 6;
-      }
 
       if (Array.isArray(prevSeats) && Array.isArray(state.game.seats)) {
         state.game.seats.forEach((s, idx) => {
@@ -1559,14 +1581,11 @@ function spawnFloatingEmoji(emoji, seatIdx = 0) {
 
 async function enterGameView() {
   state.payoutProcessedForMatch = false;
-  if (state.game && state.game.lastRolledValue == null) {
-    state.game.lastRolledValue = 6;
-  }
   await fetchRemotePlatformConfig(refreshPotPreview);
   persistActiveMatchSnapshot();
   switchView('game');
   updateP2PStatusBadge();
-  renderDiceFaces(state.game.lastRolledValue ?? 6);
+  renderDiceFaces(state.game.diceValue ?? 6);
   restartTurnTimer();
   syncGameUI();
   if (state.animFrameId) cancelAnimationFrame(state.animFrameId);
@@ -1597,19 +1616,22 @@ export function syncGameUI() {
   const promptEl = document.getElementById('turnPromptText');
   const forfeitBtn = document.getElementById('forfeitMatchBtn');
   forfeitBtn.disabled = game.phase === 'GAMEOVER' || Boolean(game.seats[state.mySeatIndex]?.eliminated);
-  const activeRollVal = game.diceValue ?? game.lastRolledValue ?? activeSeat?.lastDiceRoll ?? 6;
+  const activeRollVal = game.diceValue ?? activeSeat?.lastDiceRoll ?? null;
 
   if (game.phase === 'GAMEOVER') {
     promptEl.textContent = `${game.seats[game.winnerSeat]?.name || activeSeat.name} Won!`;
   } else if (game.phase === 'MOVE') {
-    promptEl.textContent = isMyTurn ? `Rolled ${activeRollVal}: Pick token` : `${activeSeat.name}: Choosing move...`;
+    promptEl.textContent = isMyTurn ? `Rolled ${activeRollVal ?? game.diceValue}: Pick token` : `${activeSeat.name}: Choosing move...`;
   } else {
     promptEl.textContent = isMyTurn ? `Your Turn — Roll Dice` : `${activeSeat.name}'s Turn`;
   }
   promptEl.style.color = activeMeta.light;
 
-  const displayedFace = game.diceValue ?? game.lastRolledValue ?? 6;
-  renderDiceFaces(displayedFace);
+  if (game.diceValue != null) {
+    renderDiceFaces(game.diceValue);
+  } else {
+    renderDiceFaces(6);
+  }
 
   for (let i = 0; i < 4; i++) {
     const card = document.getElementById(`playerCard-${i}`);
@@ -1629,7 +1651,7 @@ export function syncGameUI() {
       return `<span class="w-2.5 h-2.5 rounded-full bg-slate-700 border border-white/20 inline-block"></span>`;
     }).join('');
 
-    const lastRollText = seat.lastDiceRoll ? `🎲 ${seat.lastDiceRoll}` : '🎲 6';
+    const lastRollText = seat.lastDiceRoll ? `🎲 ${seat.lastDiceRoll}` : '🎲 -';
     const misses = seat.missedTurns || 0;
     const statusLabel = seat.eliminated
       ? `<span class="text-[10px] font-black text-rose-400">${seat.forfeited ? 'FORFEIT' : `OUT (${maxMiss}/${maxMiss})`}</span>`
@@ -1662,7 +1684,7 @@ export function syncGameUI() {
   diceBtn.classList.toggle('active-turn', canRoll);
   rollActionBtn.disabled = !canRoll;
   rollActionBtn.classList.toggle('opacity-45', !canRoll);
-  rollActionBtn.textContent = canRoll ? 'Roll Dice' : (isMyTurn && game.phase === 'MOVE' ? `Rolled ${activeRollVal}` : 'Wait...');
+  rollActionBtn.textContent = canRoll ? 'Roll Dice' : (isMyTurn && game.phase === 'MOVE' ? `Rolled ${activeRollVal ?? game.diceValue}` : 'Wait...');
   drawBoard();
 }
 
@@ -1732,7 +1754,6 @@ export function initGameBindings() {
     await fetchRemotePlatformConfig(refreshPotPreview);
     checkSavedMatchForRejoin();
     renderHomeQueueBoards();
-    updateAutoMatchButtonState();
     showToast('Home refreshed (5s lock active)', 'success');
   });
 
@@ -1757,7 +1778,7 @@ export function initGameBindings() {
 
   document.getElementById('startAutoMatchBtn').addEventListener('click', async () => {
     if (isUserCurrentlyInMatchOrMatchmaking()) {
-      return showToast('Cannot start matchmaking while you have an active game board.', 'danger');
+      return showToast('Cannot start matchmaking while in a game or already matching.', 'danger');
     }
     if (Number(state.account.coins) < Number(state.selectedStake)) {
       return showToast(`Insufficient balance (${state.account.coins}) for ${state.selectedStake} coin stake.`, 'danger');
@@ -1797,7 +1818,6 @@ export function initGameBindings() {
       await hostOnlineTable(false);
     } finally {
       btn.disabled = false;
-      updateAutoMatchButtonState();
     }
   });
 
@@ -1818,16 +1838,14 @@ export function initGameBindings() {
     updateAutoMatchButtonState();
     resetMatchStakeLock();
     joinRealtimeRoom(code, false);
-    setTimeout(() => { updateAutoMatchButtonState(); }, 1500);
+    setTimeout(() => { btn.disabled = false; }, 1500);
   });
 
   document.getElementById('startLocalBtn').addEventListener('click', (e) => {
     const btn = e.currentTarget;
-    if (btn.disabled || isUserCurrentlyInMatchOrMatchmaking()) {
-      return showToast('Finish or leave your active game board first.', 'danger');
-    }
+    if (btn.disabled || isUserCurrentlyInMatchOrMatchmaking()) return;
     btn.disabled = true;
-    setTimeout(() => { updateAutoMatchButtonState(); }, 1000);
+    setTimeout(() => { btn.disabled = false; }, 1000);
     cleanupOnlineChannel();
     const seats = [null, null, null, null];
     const activeIndices = state.selectedPlayerCount === 2 ? [0, 2] : [0, 1, 2, 3];
@@ -1873,7 +1891,6 @@ export function initGameBindings() {
     try {
       const snapshot = JSON.parse(raw);
       state.game = snapshot.game;
-      if (state.game.lastRolledValue == null) state.game.lastRolledValue = 6;
       state.mySeatIndex = snapshot.mySeatIndex;
       state.isAnimatingMove = false;
       if (state.game.mode === 'online' && snapshot.roomCode) {
@@ -1940,6 +1957,7 @@ export function initGameBindings() {
         showToast('Exited board — you can rejoin from Lobby while still active!', 'gold');
       }
       state.autoMatchLocked = false;
+      updateAutoMatchButtonState();
       stopTurnTimer();
       stopMatchmakingCountdown();
       state.isAnimatingMove = false;
@@ -1947,7 +1965,6 @@ export function initGameBindings() {
       state.game = null;
       document.getElementById('victoryModal').classList.add('hidden');
       await switchView('lobby');
-      updateAutoMatchButtonState();
     } finally {
       btn.disabled = false;
     }
@@ -1963,7 +1980,6 @@ export function initGameBindings() {
     cleanupOnlineChannel();
     state.game = null;
     switchView('lobby');
-    updateAutoMatchButtonState();
   });
 
   document.getElementById('victoryRematchBtn').addEventListener('click', (e) => {
@@ -1977,7 +1993,6 @@ export function initGameBindings() {
     cleanupOnlineChannel();
     state.game = null;
     switchView('lobby');
-    updateAutoMatchButtonState();
     if (prevMode === 'local') document.getElementById('startLocalBtn').click();
     else document.getElementById('startAutoMatchBtn').click();
   });

@@ -2,6 +2,8 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
 export const SUPABASE_URL = "https://cggoedzlnxkbtchvtjld.supabase.co";
 export const SUPABASE_ANON_KEY = "sb_publishable_C_pxA1KKxWWrfEiz6j2yUQ_HWQgcErJ";
+// Optional: set to `${SUPABASE_URL}/functions/v1/match-state` to offload state sync via stateless HTTP Edge Function
+export const MATCH_STATE_EDGE_FUNCTION_URL = "";
 
 export const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
   auth: {

@@ -104,28 +104,12 @@ export async function fetchRemotePlatformConfig(onRefreshPotPreview) {
   } catch (e) {}
 }
 
-export function subscribePlatformConfigRealtime(onRefreshPotPreview) {
-  if (feeConfigChannel) return;
-  feeConfigChannel = supabase
-    .channel('ludo-platform-fee-config')
-    .on(
-      'postgres_changes',
-      { event: '*', schema: 'public', table: 'platform_fee_config', filter: 'id=eq.1' },
-      (payload) => {
-        const row = payload.new;
-        if (row) {
-          state.platformConfig.gameFeePct = Number(row.game_fee_pct ?? 20);
-          state.platformConfig.brokerFeePct = Number(row.broker_fee_pct ?? 10);
-          state.platformConfig.brokerTxFeePct = Number(row.broker_tx_fee_pct ?? 5);
-          state.platformConfig.minTxLimit = Number(row.min_tx_limit ?? 500);
-          state.platformConfig.maxMissedTurns = Number(row.max_missed_turns ?? 5);
-          state.platformConfig.potStakes = parsePotStakesInput(row.pot_stakes);
-          localStorage.setItem(FEE_CONFIG_CACHE_KEY, JSON.stringify(state.platformConfig));
-          applyPlatformConfigToUI(onRefreshPotPreview);
-        }
-      }
-    )
-    .subscribe();
+// Kept for API compatibility; config is fetched on load, lobby open, refresh, and wallet modal open to save Realtime quota.
+export function subscribePlatformConfigRealtime(_onRefreshPotPreview) {
+  if (feeConfigChannel) {
+    supabase.removeChannel(feeConfigChannel);
+    feeConfigChannel = null;
+  }
 }
 
 export function initAdminBindings(onRefreshPotPreview) {
